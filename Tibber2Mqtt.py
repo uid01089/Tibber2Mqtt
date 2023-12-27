@@ -1,8 +1,10 @@
 from pathlib import Path
+from tibber import Tibber
 import time
-import os
 import logging
-import requests
+import tibber.const
+import asyncio
+import aiohttp
 
 
 import paho.mqtt.client as pahoMqtt
@@ -16,39 +18,7 @@ from PythonLib.DateUtil import DateTimeUtilities
 logger = logging.getLogger('Tibber2Mqtt')
 
 
-_QUERY = """
-{
-  viewer {
-    homes {
-      currentSubscription{
-        priceInfo{
-          current{
-            total
-            energy
-            tax
-            startsAt
-          }
-          today {
-            total
-            energy
-            tax
-            startsAt
-          }
-          tomorrow {
-            total
-            energy
-            tax
-            startsAt
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-
-# TOKEN = os.environ.get("TOKEN") or "5K4MVS-OjfWhK_4yrjOlFe1F6kJXPVf7eQYggo8ebAE"
+# https://github.com/Danielhiversen/pyTibber/tree/master
 
 
 class Module:
@@ -56,22 +26,30 @@ class Module:
         self.scheduler = Scheduler()
         self.mqttClient = Mqtt("koserver.iot", "/house/agents/Tibber2Mqtt", pahoMqtt.Client("Tibber2Mqtt"))
         self.config = MqttConfigContainer(self.mqttClient, "/house/agents/Tibber2Mqtt/config", Path("tibber2Mqtt.json"), {"Token": "5K4MVS-OjfWhK_4yrjOlFe1F6kJXPVf7eQYggo8ebAE"})
+        self.token = None
 
     def getScheduler(self) -> Scheduler:
         return self.scheduler
 
-    def getConfig(self) -> MqttConfigContainer:
-        return self.config
-
     def getMqttClient(self) -> Mqtt:
         return self.mqttClient
 
+    def getToken(self) -> str:
+        return self.token
+
     def setup(self) -> None:
+
+        self.config.setup()
+        self.config.subscribeToConfigChange(self.__updateConfig)
+
         self.scheduler.scheduleEach(self.mqttClient.loop, 500)
         self.scheduler.scheduleEach(self.config.loop, 60000)
 
     def loop(self) -> None:
         self.scheduler.loop()
+
+    def __updateConfig(self, config: dict) -> None:
+        self.token = config['Token']
 
 
 class Tibber2Mqtt:
@@ -79,44 +57,59 @@ class Tibber2Mqtt:
         self.token = None
         self.mqttClient = module.getMqttClient()
         self.scheduler = module.getScheduler()
-        self.config = module.getConfig()
-
-    def __updateIncludePattern(self, config: dict) -> None:
-        self.token = config['Token']
+        self.token = module.getToken()
+        self.tibberQuery = None
 
     def setup(self) -> None:
 
-        self.config.setup()
-        self.config.subscribeToConfigChange(self.__updateIncludePattern)
+        self.tibberQuery = Tibber(self.token, user_agent="Tibber2Mqtt_Query")
 
-        self.scheduler.scheduleEach(self.mirrorToMqtt, 10000)
+        self.mirrorRealTimeValuesToMqtt()
+
+        self.scheduler.scheduleEach(self.mirrorPriceInfoToMqtt, 10000)
         self.scheduler.scheduleEach(self.__keepAlive, 10000)
 
-    def readData(self) -> dict:
+    def mirrorRealTimeValuesToMqtt(self) -> None:
+        token = self.token
+        mqttClient = self.mqttClient
 
-        responseObj = {}
+        def _callback(pkg):
+            data = pkg.get("data")
+            if data is None:
+                return
 
-        try:
-            response = requests.post('https://api.tibber.com/v1-beta/gql',
-                                     json={'query': _QUERY},
-                                     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer {}'.format(self.token)}, timeout=10)
+            valuesForSending = DictUtil.flatDict(data.get("liveMeasurement"), "liveMeasurement")
+            for value in valuesForSending:
+                mqttClient.publish(value[0], str(value[1]))
 
-            responseObj = response.json()
+        async def run():
+            async with aiohttp.ClientSession() as session:
+                tibber_connection = Tibber(token, websession=session, user_agent="Tibber2Mqtt_Stream")
+                await tibber_connection.update_info()
+            home = tibber_connection.get_homes()[0]
+            await home.rt_subscribe(_callback)
 
-        except BaseException:
-            logging.exception('')
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(run())
 
-        return responseObj
+    def mirrorPriceInfoToMqtt(self) -> None:
 
-    def mirrorToMqtt(self) -> None:
+        tibberQuery = self.tibberQuery
+        mqttClient = self.mqttClient
 
-        priceData = self.readData()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+        async def start() -> None:
+            await tibberQuery.update_info()
+            home = tibberQuery.get_homes()[0]
+            await home.fetch_consumption_data()
+            await home.update_info()
+            await home.update_price_info()
 
-        valuesForSending = DictUtil.flatDict(priceData, "priceInfo")
-        # print (valuesForSending)
+            valuesForSending = DictUtil.flatDict(home.current_price_info, "priceInfo")
+            for value in valuesForSending:
+                mqttClient.publishOnChange(value[0], str(value[1]))
 
-        for value in valuesForSending:
-            self.mqttClient.publishOnChange(value[0], str(value[1]))
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(start())
 
     def __keepAlive(self) -> None:
         self.mqttClient.publishIndependentTopic('/house/agents/Tibber2Mqtt/heartbeat', DateTimeUtilities.getCurrentDateString())
@@ -126,6 +119,7 @@ class Tibber2Mqtt:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     logging.getLogger('Tibber2Mqtt').setLevel(logging.DEBUG)
+    logging.getLogger('gql.transport.websockets').setLevel(logging.WARNING)
 
     module = Module()
     module.setup()
@@ -133,6 +127,8 @@ def main() -> None:
     logging.getLogger('Tibber2Mqtt').addHandler(MQTTHandler(module.getMqttClient(), '/house/agents/Tibber2Mqtt/log'))
 
     Tibber2Mqtt(module).setup()
+
+    print("Tibber2Mqtt is running")
 
     while (True):
         module.loop()
