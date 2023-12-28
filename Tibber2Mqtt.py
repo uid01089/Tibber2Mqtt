@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import NoReturn
 from tibber import Tibber
 import time
 import logging
@@ -24,7 +25,7 @@ logger = logging.getLogger('Tibber2Mqtt')
 class Module:
     def __init__(self) -> None:
         self.scheduler = Scheduler()
-        self.mqttClient = Mqtt("koserver.iot", "/house/agents/Tibber2Mqtt", pahoMqtt.Client("Tibber2Mqtt"))
+        self.mqttClient = Mqtt("koserver.iot", "/house/agents/Tibber2Mqtt", pahoMqtt.Client("Tibber2Mqtt1"))
         self.config = MqttConfigContainer(self.mqttClient, "/house/agents/Tibber2Mqtt/config", Path("tibber2Mqtt.json"), {"Token": "5K4MVS-OjfWhK_4yrjOlFe1F6kJXPVf7eQYggo8ebAE"})
         self.token = None
 
@@ -58,15 +59,15 @@ class Tibber2Mqtt:
         self.mqttClient = module.getMqttClient()
         self.scheduler = module.getScheduler()
         self.token = module.getToken()
-        self.tibberQuery = None
 
     def setup(self) -> None:
 
         self.tibberQuery = Tibber(self.token, user_agent="Tibber2Mqtt_Query")
 
         self.mirrorRealTimeValuesToMqtt()
+        self.mirrorPriceInfoToMqtt()
 
-        self.scheduler.scheduleEach(self.mirrorPriceInfoToMqtt, 10000)
+        self.scheduler.scheduleEach(self.mirrorPriceInfoToMqtt, 30 * 60000)  # all 30 min
         self.scheduler.scheduleEach(self.__keepAlive, 10000)
 
     def mirrorRealTimeValuesToMqtt(self) -> None:
@@ -82,31 +83,52 @@ class Tibber2Mqtt:
             for value in valuesForSending:
                 mqttClient.publish(value[0], str(value[1]))
 
-        async def run():
-            async with aiohttp.ClientSession() as session:
-                tibber_connection = Tibber(token, websession=session, user_agent="Tibber2Mqtt_Stream")
-                await tibber_connection.update_info()
-            home = tibber_connection.get_homes()[0]
-            await home.rt_subscribe(_callback)
+        async def run() -> NoReturn:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    tibber_connection = Tibber(token, websession=session, user_agent="Tibber2Mqtt_Stream")
+                    await tibber_connection.update_info()
+                    home = tibber_connection.get_homes()[0]
+                    await home.rt_subscribe(_callback)
+
+            except aiohttp.ClientConnectionError as e:
+                print(f"Error: {e}")
+                # Handle the connection error here
+            except BaseException as e:
+                print(f"An unexpected error occurred: {e}")
+                # Handle other unexpected errors here
+
+            while True:
+                await asyncio.sleep(10)
 
         loop = asyncio.get_event_loop()
         loop.run_until_complete(run())
 
     def mirrorPriceInfoToMqtt(self) -> None:
-
-        tibberQuery = self.tibberQuery
+        token = self.token
         mqttClient = self.mqttClient
 
         async def start() -> None:
-            await tibberQuery.update_info()
-            home = tibberQuery.get_homes()[0]
-            await home.fetch_consumption_data()
-            await home.update_info()
-            await home.update_price_info()
 
-            valuesForSending = DictUtil.flatDict(home.current_price_info, "priceInfo")
-            for value in valuesForSending:
-                mqttClient.publishOnChange(value[0], str(value[1]))
+            try:
+                async with aiohttp.ClientSession() as session:
+                    tibber_connection = Tibber(token, websession=session, user_agent="Tibber2Mqtt_Query")
+                    await tibber_connection.update_info()
+                    home = tibber_connection.get_homes()[0]
+                    await home.fetch_consumption_data()
+                    await home.update_info()
+                    await home.update_price_info()
+
+                valuesForSending = DictUtil.flatDict(home.current_price_info, "priceInfo")
+                for value in valuesForSending:
+                    mqttClient.publishOnChange(value[0], str(value[1]))
+
+            except aiohttp.ClientConnectionError as e:
+                print(f"Error: {e}")
+                # Handle the connection error here
+            except BaseException as e:
+                print(f"An unexpected error occurred: {e}")
+                # Handle other unexpected errors here
 
         loop = asyncio.get_event_loop()
         loop.run_until_complete(start())
