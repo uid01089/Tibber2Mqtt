@@ -15,6 +15,7 @@ from PythonLib.MqttConfigContainer import MqttConfigContainer
 from PythonLib.Scheduler import Scheduler
 from PythonLib.DictUtil import DictUtil
 from PythonLib.DateUtil import DateTimeUtilities
+from TibberWrapper import TibberPriceInfo, TibberStreamWrapper
 
 logger = logging.getLogger('Tibber2Mqtt')
 
@@ -59,79 +60,30 @@ class Tibber2Mqtt:
         self.mqttClient = module.getMqttClient()
         self.scheduler = module.getScheduler()
         self.token = module.getToken()
+        self.tibberQuery = None
+        self.tibberStream = None
 
     def setup(self) -> None:
 
-        self.tibberQuery = Tibber(self.token, user_agent="Tibber2Mqtt_Query")
+        self.tibberQuery = TibberPriceInfo(self.token, self._tibberPriceInfoCallback)
+        self.tibberStream = TibberStreamWrapper(self.token, self._tibberStreamCallback)
+        self.tibberStream.runStream()
+        self.scheduler.scheduleEach(self.tibberStream.loop, 1000)
 
-        self.mirrorRealTimeValuesToMqtt()
-        self.mirrorPriceInfoToMqtt()
+        self.tibberQuery.execute()
 
-        self.scheduler.scheduleEach(self.mirrorPriceInfoToMqtt, 30 * 60000)  # all 30 min
+        self.scheduler.scheduleEach(self.tibberQuery.execute, 30 * 60000)  # all 30 min
         self.scheduler.scheduleEach(self.__keepAlive, 10000)
 
-    def mirrorRealTimeValuesToMqtt(self) -> None:
-        token = self.token
-        mqttClient = self.mqttClient
+    def _tibberPriceInfoCallback(self, data: dict) -> None:
+        valuesForSending = DictUtil.flatDict(data, "priceInfo")
+        for value in valuesForSending:
+            self.mqttClient.publishOnChange(value[0], str(value[1]))
 
-        def _callback(pkg):
-            data = pkg.get("data")
-            if data is None:
-                return
-
-            valuesForSending = DictUtil.flatDict(data.get("liveMeasurement"), "liveMeasurement")
-            for value in valuesForSending:
-                mqttClient.publish(value[0], str(value[1]))
-
-        async def run() -> NoReturn:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    tibber_connection = Tibber(token, websession=session, user_agent="Tibber2Mqtt_Stream")
-                    await tibber_connection.update_info()
-                    home = tibber_connection.get_homes()[0]
-                    await home.rt_subscribe(_callback)
-
-            except aiohttp.ClientConnectionError as e:
-                print(f"Error: {e}")
-                # Handle the connection error here
-            except BaseException as e:
-                print(f"An unexpected error occurred: {e}")
-                # Handle other unexpected errors here
-
-            while True:
-                await asyncio.sleep(10)
-
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(run())
-
-    def mirrorPriceInfoToMqtt(self) -> None:
-        token = self.token
-        mqttClient = self.mqttClient
-
-        async def start() -> None:
-
-            try:
-                async with aiohttp.ClientSession() as session:
-                    tibber_connection = Tibber(token, websession=session, user_agent="Tibber2Mqtt_Query")
-                    await tibber_connection.update_info()
-                    home = tibber_connection.get_homes()[0]
-                    await home.fetch_consumption_data()
-                    await home.update_info()
-                    await home.update_price_info()
-
-                valuesForSending = DictUtil.flatDict(home.current_price_info, "priceInfo")
-                for value in valuesForSending:
-                    mqttClient.publishOnChange(value[0], str(value[1]))
-
-            except aiohttp.ClientConnectionError as e:
-                print(f"Error: {e}")
-                # Handle the connection error here
-            except BaseException as e:
-                print(f"An unexpected error occurred: {e}")
-                # Handle other unexpected errors here
-
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(start())
+    def _tibberStreamCallback(self, data: dict) -> None:
+        valuesForSending = DictUtil.flatDict(data.get("liveMeasurement"), "liveMeasurement")
+        for value in valuesForSending:
+            self.mqttClient.publish(value[0], str(value[1]))
 
     def __keepAlive(self) -> None:
         self.mqttClient.publishIndependentTopic('/house/agents/Tibber2Mqtt/heartbeat', DateTimeUtilities.getCurrentDateString())
