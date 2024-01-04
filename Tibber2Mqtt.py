@@ -76,7 +76,7 @@ class Tibber2Mqtt:
 
         self.tibberQuery = TibberPriceInfo(self.token, self._tibberPriceInfoCallback)
         await self.tibberQuery.execute()
-        await self.scheduler.scheduleEach(self.tibberQuery.execute, 60 * 1000)  # all 30 min: 30 * 60 * 1000
+        await self.scheduler.scheduleEach(self.tibberQuery.execute, 30 * 60 * 1000)  # all 30 min: 30 * 60 * 1000
 
         await self.scheduler.scheduleEach(self.__keepAlive, 10000)
 
