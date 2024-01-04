@@ -8,7 +8,7 @@ from PythonLib.Scheduler import Scheduler
 
 logger = logging.getLogger('TibberWrapper')
 
-TIME_OUT_S = 5
+TIME_OUT_S = 20
 
 
 class TibberPriceInfo:
@@ -16,10 +16,12 @@ class TibberPriceInfo:
         self.token = token
         self.task = None
         self.callback = callback
+        self.background_tasks = set()
 
-    def execute(self) -> None:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(self._asyncRun())
+    async def execute(self) -> None:
+        task = asyncio.create_task(self._asyncRun())
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.remove)
 
     async def _asyncRun(self) -> None:
         try:
@@ -30,8 +32,7 @@ class TibberPriceInfo:
                 await home.fetch_consumption_data()
                 await home.update_info()
                 await home.update_price_info()
-
-                self.callback(home.current_price_info)
+                await self.callback(home.current_price_info)
 
         except aiohttp.ClientConnectionError as e:
             logging.exception('_1_')
@@ -46,14 +47,17 @@ class TibberStreamWrapper:
         self.task = None
         self.callback = callback
         self.startTime = 0
+        self.background_tasks = set()
 
-    def runStream(self) -> None:
+    async def runStream(self) -> None:
+
         self.startTime = Scheduler.getSeconds()
-        self.task = asyncio.ensure_future(self._asyncRun())
-        loop = asyncio.get_event_loop()
-        loop.run_forever()
 
-    def loop(self) -> None:
+        task = asyncio.create_task(self._asyncRun())
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.remove)
+
+    async def loop(self) -> None:
 
         if self.task is None:
             return
@@ -72,7 +76,7 @@ class TibberStreamWrapper:
                 tibber_connection = Tibber(self.token, websession=session, user_agent="Tibber2Mqtt_Stream")
                 await tibber_connection.update_info()
                 home = tibber_connection.get_homes()[0]
-                await home.rt_subscribe(self._callback)
+                await home.rt_subscribe(self._syncCallback)
 
         except aiohttp.ClientConnectionError as e:
             logging.exception('_3_')
@@ -82,7 +86,7 @@ class TibberStreamWrapper:
         while True:
             await asyncio.sleep(10)
 
-    def _callback(self, pkg):
+    def _syncCallback(self, pkg):
         data = pkg.get("data")
         if data is None:
             return
@@ -91,4 +95,6 @@ class TibberStreamWrapper:
         self.startTime = Scheduler.getSeconds()
 
         # Provide results
-        self.callback(data)
+        task = asyncio.create_task(self.callback(data))
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.remove)
