@@ -1,12 +1,6 @@
 from pathlib import Path
-import sys
-from typing import NoReturn
-from tibber import Tibber
-import time
 import logging
-import tibber.const
 import asyncio
-import aiohttp
 
 
 import paho.mqtt.client as pahoMqtt
@@ -16,7 +10,7 @@ from PythonLib.AsyncMqttConfigContainer import AsyncMqttConfigContainer
 from PythonLib.AsyncScheduler import AsyncScheduler
 from PythonLib.DictUtil import DictUtil
 from PythonLib.DateUtil import DateTimeUtilities
-from TibberWrapper import TibberPriceInfo, TibberStreamWrapper
+from TibberWrapper import TibberWrapper
 
 logger = logging.getLogger('Tibber2Mqtt')
 
@@ -61,6 +55,7 @@ class Tibber2Mqtt:
         self.token = None
         self.tibberQuery = None
         self.tibberStream = None
+        self.tibberWrapper = None
 
         self.module = module
 
@@ -70,13 +65,8 @@ class Tibber2Mqtt:
         self.scheduler = await self.module.getScheduler()
         self.token = await self.module.getToken()
 
-        self.tibberStream = TibberStreamWrapper(self.token, self._tibberStreamCallback)
-        await self.tibberStream.runStream()
-        await self.scheduler.scheduleEach(self.tibberStream.loop, 1000)
-
-        self.tibberQuery = TibberPriceInfo(self.token, self._tibberPriceInfoCallback)
-        await self.tibberQuery.execute()
-        await self.scheduler.scheduleEach(self.tibberQuery.execute, 30 * 60 * 1000)  # all 30 min: 30 * 60 * 1000
+        self.tibberWrapper = TibberWrapper(self.token, self._tibberPriceInfoCallback, self._tibberStreamCallback)
+        await self.tibberWrapper.execute()
 
         await self.scheduler.scheduleEach(self.__keepAlive, 10000)
 
