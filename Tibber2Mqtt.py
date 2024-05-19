@@ -16,6 +16,8 @@ logger = logging.getLogger('Tibber2Mqtt')
 
 
 # https://github.com/Danielhiversen/pyTibber/tree/master
+# https://github.com/graphql-python/gql/
+# https://developer.tibber.com/docs/overview
 
 
 class Module:
@@ -70,8 +72,18 @@ class Tibber2Mqtt:
 
         await self.scheduler.scheduleEach(self.__keepAlive, 10000)
 
-    async def _tibberPriceInfoCallback(self, data: dict) -> None:
-        valuesForSending = DictUtil.flatDict(data, "priceInfo")
+    async def _tibberPriceInfoCallback(self, data: tuple[dict, dict]) -> None:
+
+        currentPriceInfo = data[0]
+        valuesForSending = DictUtil.flatDict(currentPriceInfo, "priceInfo")
+        for value in valuesForSending:
+            await self.mqttClient.publishOnChange(value[0], str(value[1]))
+
+        priceGraph = {'timeTable': []}
+        for time, value in data[1].items():
+            priceGraph['timeTable'].append({"time": time, "price": value})
+
+        valuesForSending = DictUtil.flatDict(priceGraph, "priceGraph")
         for value in valuesForSending:
             await self.mqttClient.publishOnChange(value[0], str(value[1]))
 
