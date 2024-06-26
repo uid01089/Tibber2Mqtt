@@ -1,6 +1,3 @@
 [submodule "PythonLib"]
 	path = PythonLib
 	url = https://github.com/uid01089/PythonLib.git
-[submodule "pyTibber"]
-	path = pyTibber
-	url = https://github.com/uid01089/pyTibber.git
